@@ -94,7 +94,7 @@ if metric in ('HW33','TR25') and uploaded is not None:
         value_col = st.selectbox('실제 지표값 열', nums) if nums else None
     if not value_col:
         st.warning('숫자로 해석할 수 있는 열을 찾지 못했습니다.')
-        else:
+    else:
         d = df.copy()
         d['_region'] = d[region_col].map(clean_region)
         if scenario_col != '(선택 안 함)':
@@ -158,3 +158,13 @@ st_folium(m, height=600, use_container_width=True, returned_objects=[])
 
 st.subheader('시군별 자료')
 table = pd.DataFrame({'시군':REGIONS, value_name:[lookup.get(region) for region in REGIONS]})
+if lookup:
+    table = table.sort_values(value_name, ascending=False, na_position='last')
+st.dataframe(table, hide_index=True, use_container_width=True)
+if lookup:
+    st.download_button('선택한 시군별 자료 CSV 다운로드',table.to_csv(index=False).encode('utf-8-sig'),file_name='gangwon_selected_data.csv',mime='text/csv')
+else:
+    st.caption('시군별 수치가 연결되기 전에는 임의의 폭염 또는 취약성 값을 채우지 않습니다.')
+
+st.divider()
+st.caption('경계자료: 사용자 제공 SGIS 시군구 경계 2025년 2분기 (기준일 2025-06-30). 공개 기본틀은 데이터 미연결 상태에서도 지도를 보여줍니다.')
