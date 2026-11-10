@@ -12,6 +12,7 @@ import pandas as pd
 import folium
 import streamlit as st
 from branca.colormap import linear
+from branca.element import Element
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="강원 고령인구 폭염 취약성 Web-GIS", page_icon="🗺️", layout="wide")
@@ -126,8 +127,10 @@ with st.container():
     c3.metric('분석 연대', decade)
     c4.metric('지표 연결', f'{len(lookup)}/18개')
 
-# 시군 경계 전체를 포함하는 고정 지도 범위. 좌표는 경계 자료의 대략적인 외접 범위.
-m = folium.Map(location=[37.73,128.26], zoom_start=8, tiles='OpenStreetMap', control_scale=True)
+# 강원 행정구역만 표시: 배경 타일(도로/바다/다른 지역) 제거
+m = folium.Map(location=[37.73, 128.26], zoom_start=8, tiles=None, control_scale=False, zoom_control=True, prefer_canvas=True)
+# Leaflet 지도 영역의 바탕을 흰색으로 지정
+m.get_root().header.add_child(Element('<style>.leaflet-container {background: #ffffff !important;}</style>'))
 vals = list(lookup.values())
 cmap = None
 if vals:
@@ -144,13 +147,15 @@ for f in geo['features']:
 def style(feature):
     v = feature['properties'].get('value')
     return {'fillColor': cmap(v) if (cmap is not None and v is not None) else '#d9e4ee',
-            'color':'#526474','weight':1.5,'fillOpacity':0.75}
+            'color':'#526474','weight':1.5,'fillOpacity':0.90}
 
-folium.GeoJson(geo,name='강원 18개 시군',style_function=style,
+boundary_layer = folium.GeoJson(geo,name='강원 18개 시군',style_function=style,
     highlight_function=lambda feature: {'weight':3,'color':'#1f2937','fillOpacity':0.9},
     tooltip=folium.GeoJsonTooltip(fields=['region','display_value'],aliases=['시군: ', f'{value_name}: ']),
     popup=folium.GeoJsonPopup(fields=['region','code','display_value'],aliases=['시군: ','행정구역 코드: ',f'{value_name}: '])
 ).add_to(m)
+# 모든 시군 경계가 현재 화면에 들어오도록 자동 맞춤
+m.fit_bounds(boundary_layer.get_bounds(), padding=(24, 24))
 if cmap is not None:
     cmap.add_to(m)
 folium.LayerControl(collapsed=True).add_to(m)
