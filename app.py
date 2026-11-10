@@ -157,26 +157,54 @@ boundary_layer = folium.GeoJson(geo,name='강원 18개 시군',style_function=st
 # 모든 시군 경계가 현재 화면에 들어오도록 자동 맞춤
 m.fit_bounds(boundary_layer.get_bounds(), padding=(24, 24))
 
-# 이 MacroElement는 Folium의 fitBounds 실행 후에 동작하므로
-# 처음 화면에 보이는 지도 크기를 최소 확대 단계로 정확히 사용합니다.
-class InitialZoomLimits(MacroElement):
+# 처음 화면에서 지도를 중앙 고정하고, 확대 시에만 지정 범위 안에서 이동을 허용합니다.
+# 지도 경계는 처음 맞춤 화면의 전체 영역(흰색 여백 포함)으로 설정합니다.
+class InitialViewportLock(MacroElement):
     def __init__(self, max_additional_steps=4):
         super().__init__()
-        self._name = "InitialZoomLimits"
+        self._name = "InitialViewportLock"
         self.max_additional_steps = int(max_additional_steps)
         self._template = Template("""
         {% macro script(this, kwargs) %}
-        {{ this._parent.get_name() }}.whenReady(function () {
+        (function () {
             var map = {{ this._parent.get_name() }};
-            var initialZoom = map.getZoom();
-            map.setMinZoom(initialZoom);
-            map.setMaxZoom(initialZoom + {{ this.max_additional_steps }});
-        });
+            map.whenReady(function () {
+                // fitBounds가 정한 초기 확대 수준과 중심을 저장
+                var baseZoom = map.getZoom();
+                var homeCenter = map.getCenter();
+                var homeBounds = map.getBounds();
+
+                // 기본 크기보다 축소 금지, 기본 크기에서 4단계 확대 허용
+                map.setMinZoom(baseZoom);
+                map.setMaxZoom(baseZoom + {{ this.max_additional_steps }});
+
+                // 처음 화면 바깥으로 이동하지 않도록 완전한 경계 제한
+                map.setMaxBounds(homeBounds);
+                map.options.maxBoundsViscosity = 1.0;
+
+                function updateInteraction() {
+                    if (map.getZoom() <= baseZoom + 0.001) {
+                        // 기본 크기에서는 중심으로 복귀하고 드래그 이동 잠금
+                        map.panTo(homeCenter, {animate: false});
+                        map.dragging.disable();
+                        map.keyboard.disable();
+                    } else {
+                        // 확대 후에는 처음 화면 범위 안에서만 이동 가능
+                        map.dragging.enable();
+                        map.keyboard.enable();
+                    }
+                }
+
+                map.on('zoomend', updateInteraction);
+                updateInteraction();
+            });
+        })();
         {% endmacro %}
         """)
 
-# 자동 맞춤 뒤에 실행되도록 지도에 마지막에 추가
-m.add_child(InitialZoomLimits(max_additional_steps=4))
+
+# 자동 맞춤 뒤에 적용하며, 마우스·터치 이동 경계도 함께 제한
+m.add_child(InitialViewportLock(max_additional_steps=4))
 
 if cmap is not None:
     cmap.add_to(m)
