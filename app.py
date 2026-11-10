@@ -12,7 +12,7 @@ import pandas as pd
 import folium
 import streamlit as st
 from branca.colormap import linear
-from branca.element import Element
+from branca.element import Element, MacroElement, Template
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="강원 고령인구 폭염 취약성 Web-GIS", page_icon="🗺️", layout="wide")
@@ -156,6 +156,28 @@ boundary_layer = folium.GeoJson(geo,name='강원 18개 시군',style_function=st
 ).add_to(m)
 # 모든 시군 경계가 현재 화면에 들어오도록 자동 맞춤
 m.fit_bounds(boundary_layer.get_bounds(), padding=(24, 24))
+
+# 이 MacroElement는 Folium의 fitBounds 실행 후에 동작하므로
+# 처음 화면에 보이는 지도 크기를 최소 확대 단계로 정확히 사용합니다.
+class InitialZoomLimits(MacroElement):
+    def __init__(self, max_additional_steps=4):
+        super().__init__()
+        self._name = "InitialZoomLimits"
+        self.max_additional_steps = int(max_additional_steps)
+        self._template = Template("""
+        {% macro script(this, kwargs) %}
+        {{ this._parent.get_name() }}.whenReady(function () {
+            var map = {{ this._parent.get_name() }};
+            var initialZoom = map.getZoom();
+            map.setMinZoom(initialZoom);
+            map.setMaxZoom(initialZoom + {{ this.max_additional_steps }});
+        });
+        {% endmacro %}
+        """)
+
+# 자동 맞춤 뒤에 실행되도록 지도에 마지막에 추가
+m.add_child(InitialZoomLimits(max_additional_steps=4))
+
 if cmap is not None:
     cmap.add_to(m)
 folium.LayerControl(collapsed=True).add_to(m)
