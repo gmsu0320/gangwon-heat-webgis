@@ -69,6 +69,83 @@ def format_value(value, col):
     return f'{value:.4f}'
 
 
+def _point_in_ring(lon, lat, ring):
+    """레이캐스팅으로 경위도가 GeoJSON 선형 링 내부에 있는지 판별."""
+    inside = False
+    if len(ring) < 3:
+        return False
+    for idx in range(len(ring)):
+        x1, y1 = ring[idx][:2]
+        x2, y2 = ring[(idx + 1) % len(ring)][:2]
+        if (y1 > lat) != (y2 > lat):
+            x_at_lat = x1 + (lat - y1) * (x2 - x1) / (y2 - y1)
+            if lon < x_at_lat:
+                inside = not inside
+    return inside
+
+
+def _point_in_geometry(lon, lat, geometry):
+    """Polygon / MultiPolygon 및 내부 구멍(hole)을 지원."""
+    kind = geometry.get('type')
+    if kind == 'Polygon':
+        polygons = [geometry.get('coordinates', [])]
+    elif kind == 'MultiPolygon':
+        polygons = geometry.get('coordinates', [])
+    else:
+        return False
+
+    for polygon in polygons:
+        if not polygon:
+            continue
+        outer_ring, *holes = polygon
+        if _point_in_ring(lon, lat, outer_ring) and not any(
+            _point_in_ring(lon, lat, hole) for hole in holes
+        ):
+            return True
+    return False
+
+
+def region_from_map_click(click, geojson):
+    """Folium에서 전달한 클릭 좌표를 18개 시군 GeoJSON에 연결."""
+    point = click.get('last_object_clicked')
+    if isinstance(point, dict):
+        try:
+            lat = float(point['lat'])
+            lon = float(point['lng'])
+        except (KeyError, ValueError, TypeError):
+            pass
+        else:
+            for feature in geojson['features']:
+                if _point_in_geometry(lon, lat, feature['geometry']):
+                    return feature['properties']['region']
+
+    # 구버전 호환용: 좌표가 전달되지 않을 때 툴팁의 시군 이름 사용
+    tooltip = click.get('last_object_clicked_tooltip')
+    if isinstance(tooltip, str):
+        return next((name for name in REGIONS if name in tooltip), None)
+    return None
+
+
+def map_click_token(click):
+    """같은 클릭 이벤트에 의한 무한 재실행 및 선택값 되돌림 방지."""
+    click_count = click.get('last_object_clicked_count')
+    try:
+        if click_count is not None and int(click_count) > 0:
+            return ('count', int(click_count))
+    except (TypeError, ValueError):
+        pass
+
+    # 예전 streamlit-folium에는 클릭 횟수 반환값이 없을 수 있음
+    point = click.get('last_object_clicked')
+    if isinstance(point, dict) and 'lat' in point and 'lng' in point:
+        try:
+            return ('coordinate', round(float(point['lat']), 8),
+                    round(float(point['lng']), 8))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 @st.cache_data(show_spinner=False)
 def load_boundary():
     with GEO_PATH.open(encoding='utf-8') as f:
@@ -117,11 +194,40 @@ def load_hvi():
 
 
 # 설명 팝업: Streamlit 1.34 이상의 st.dialog 사용
+@st.dialog('폭염 취약성(HVI)이란?')
+def show_hvi_dialog():
+    st.markdown("""
+**폭염 취약성 지수(HVI)는** 지역별 폭염 위험, 인구 특성, 대응 여건을
+종합하여 **폭염에 상대적으로 얼마나 취약한지** 나타내는 지수입니다.
+**값이 높을수록 폭염 취약성이 높습니다.**
+
+**① 기후 노출도(E)** — 얼마나 더운 날이 많은가?
+- **HW33:** 일 최고기온 33℃ 이상인 날의 수(폭염일수)
+- **TR25:** 일 최저기온 25℃ 이상인 날의 수(열대야일수)
+
+**② 민감도(S)** — 폭염에 영향을 받기 쉬운 특성이 얼마나 큰가?
+- 65세 이상 인구 비율, 65세 이상 중 75세 이상 비율
+- 독거노인가구 비율, 온열질환 발생률
+
+**③ 적응능력(AC)** — 폭염에 대응할 여건이 얼마나 갖춰져 있는가?
+- 65세 이상 1,000명당 무더위쉼터 수
+- 전체 인구 10만 명당 응급의료기관 수
+- **AC가 높을수록 대응능력이 좋은 것**으로 해석합니다.
+
+**최종 계산식 (VESTAP 준용 A안)**
+
+`HVI = 0.50 × E + 0.25 × S + 0.25 × (1 − AC)`
+
+세 영역은 0~1 범위로 정규화하여 계산합니다.
+**HVI 0.7은 피해 발생 확률이 70%라는 의미가 아닌, 지역 간 상대 비교값**입니다.
+    """)
+
+
 @st.dialog('SSP 시나리오란?')
 def show_ssp_dialog():
     st.markdown('''
-**SSP(Shared Socioeconomic Pathways)** 는 미래 사회·경제
-발전경로를 가정한 **공통사회경제경로**입니다. 기후변화 전망에서는 SSP 경로와 온실가스 배출·복사강제력 수준을 함께 사용합니다.
+**SSP(Shared Socioeconomic Pathways)는** 미래 사회·경제 발전경로를 가정한
+**공통사회경제경로**입니다. 기후변화 전망에서는 SSP 경로와 온실가스 배출·복사강제력 수준을 함께 사용합니다.
 
 | 기후 시나리오 | 간단한 설명 |
 |---|---|
@@ -130,7 +236,7 @@ def show_ssp_dialog():
 | **SSP3-7.0** | 지역 간 경쟁과 높은 배출이 지속되는 경로 |
 | **SSP5-8.5** | 화석연료 중심의 고배출 경로 |
 
-뒤의 숫자(2.6, 4.5, 7.0, 8.5)는 2100년 무렵의 복사강제력 수준(W/m²)을 나타냅니다.
+**뒤의 숫자(2.6, 4.5, 7.0, 8.5)**는 2100년 무렵의 복사강제력 수준(W/m²)을 나타냅니다.
 
 본 지도는 네 가지 **기후** SSP를 비교합니다. 반면 미래 **인구구조**는
 SSP2 국가 인구전망을 공통으로 적용해 기후 시나리오 변화에 따른 차이를 비교합니다.
@@ -149,6 +255,7 @@ def show_analysis_dialog():
 - **민감도(S)**: 65세 이상 인구 비율, 65세 이상 중 75세 이상 비율,
   독거노인가구 비율, 온열질환 발생률
 - **적응능력(AC)**: 무더위쉼터와 응급의료기관의 인구 대비 공급률
+- **가중치: VESTAP 준용 A안 고정**
 
 **HVI = 0.50 × E + 0.25 × S + 0.25 × (1 − AC)**
 
@@ -181,15 +288,25 @@ except (ValueError, OSError, KeyError, json.JSONDecodeError) as exc:
     st.error(f'지도 입력자료 검증 실패: {exc}')
     st.stop()
 
+
+# 지도 클릭 결과는 다음 실행에서 selectbox가 만들어지기 전에 적용해야 함.
+# 이미 만들어진 위젯의 session_state를 같은 실행 중 수정하면 오류가 발생함.
+if 'selected_region_widget' not in st.session_state:
+    st.session_state['selected_region_widget'] = REGIONS[0]
+if '_pending_map_region' in st.session_state:
+    st.session_state['selected_region_widget'] = st.session_state.pop('_pending_map_region')
+
 with st.sidebar:
     st.header('분석 조건')
     scenario = st.selectbox('기후변화 시나리오', SCENARIOS, index=3)
     decade = st.selectbox('분석 연대', list(DECADES), index=7)
     metric = st.selectbox('표시 항목', list(METRICS))
     st.divider()
-    region_selected = st.selectbox('지역별 상세 조회', REGIONS)
+    region_selected = st.selectbox('지역별 상세 조회', REGIONS, key='selected_region_widget')
     st.divider()
     st.subheader('지도 이용 안내')
+    if st.button('폭염 취약성(HVI)이란?', use_container_width=True, key='hvi_help'):
+        show_hvi_dialog()
     if st.button('SSP 시나리오란?', use_container_width=True, key='ssp_help'):
         show_ssp_dialog()
     if st.button('분석 내용 설명', use_container_width=True, key='analysis_help'):
@@ -225,18 +342,8 @@ legend_label = f'{metric} · SSP/연대 공통 색상범위'
 m = folium.Map(location=[37.73, 128.26], zoom_start=8, tiles=None,
                control_scale=False, zoom_control=True, prefer_canvas=True,
                attribution_control=False)
-# 지도 배경 흰색 유지 + 지도 화면 외곽 테두리 추가
-m.get_root().header.add_child(
-    Element("""
-    <style>
-    .leaflet-container {
-        background: #ffffff !important;
-        border: 1px solid #333333 !important;
-        box-sizing: border-box;
-    }
-    </style>
-    """)
-)
+m.get_root().header.add_child(Element(
+    '<style>.leaflet-container {background: #ffffff !important; border: 1px solid #333333 !important; box-sizing: border-box;}</style>'))
 
 for f in geo['features']:
     name = f['properties']['region']
@@ -328,7 +435,36 @@ st.markdown(
              {legend_ticks_html}</div>
         </div>''', unsafe_allow_html=True
 )
-st_folium(m, height=600, use_container_width=True, returned_objects=[])
+# 시군 폴리곤을 클릭하면 클릭 지점과 클릭 횟수를 Streamlit으로 반환함.
+# SSP/연대/표시 지표별 별도 키를 사용해 과거 클릭이 다른 조건에 재적용되는 문제 방지.
+map_view_key = f"heatcare_map_{scenario}_{DECADES[decade]}_{metric_col}"
+map_response = st_folium(
+    m,
+    height=600,
+    use_container_width=True,
+    key=map_view_key,
+    returned_objects=[
+        'last_object_clicked',
+        'last_object_clicked_count',
+        'last_object_clicked_tooltip',
+    ],
+)
+
+# 클릭을 지도 선택값과 연동하고 그래프를 자동으로 갱신.
+# 같은 클릭으로 반복 재실행되지 않도록 화면별로 마지막 이벤트를 저장함.
+if isinstance(map_response, dict):
+    event = map_click_token(map_response)
+    if event is not None:
+        last_events = st.session_state.setdefault('_processed_map_events', {})
+        if last_events.get(map_view_key) != event:
+            last_events[map_view_key] = event
+            clicked_region = region_from_map_click(map_response, geo)
+            if clicked_region in REGIONS and clicked_region != region_selected:
+                # 아래 selectbox는 이미 렌더링되었으므로, 이번 실행에서 직접 값을
+                # 바꾸지 않고 다음 실행의 최상단에서 적용한다.
+                st.session_state['_pending_map_region'] = clicked_region
+                st.rerun()
+
 
 st.subheader('시군별 비교')
 table = subset[['시군','취약성순위','HVI_A','HW33_일수','TR25_일수',
