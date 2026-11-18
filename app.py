@@ -235,7 +235,7 @@ class InitialViewportLock(MacroElement):
         """)
 
 
-m.add_child(InitialViewportLock(max_additional_steps=4))
+m.add_child(InitialViewportLock(max_additional_steps=3))
 cmap.add_to(m)
 folium.LayerControl(collapsed=True).add_to(m)
 st_folium(m, height=600, use_container_width=True, returned_objects=[])
