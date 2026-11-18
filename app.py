@@ -6,6 +6,7 @@
 분석자료: 최신 방법 3 인구전망을 적용한 A안 HVI 576행
 """
 from pathlib import Path
+from html import escape
 import json
 import re
 import pandas as pd
@@ -22,6 +23,8 @@ HVI_PATH = ROOT / "data" / "04_최종HVI_576행.csv"
 REGIONS = ['강릉시','고성군','동해시','삼척시','속초시','양구군','양양군','영월군',
            '원주시','인제군','정선군','철원군','춘천시','태백시','평창군','홍천군','화천군','횡성군']
 SCENARIOS = ['SSP1-2.6','SSP2-4.5','SSP3-7.0','SSP5-8.5']
+# 그래프 선 색상 고정: SSP1 진파랑 / SSP2 연파랑 / SSP3 연분홍 / SSP5 빨강
+SSP_LINE_COLORS = ['#0877D9', '#74C6FF', '#F5A1A8', '#FF263B']
 DECADES = {f'{year}년대': str(year) for year in range(2020, 2100, 10)}
 METRICS = {
     '종합 폭염 취약성 (HVI)': 'HVI_A',
@@ -112,9 +115,59 @@ def load_hvi():
     return df
 
 
+# 설명 팝업: Streamlit 1.34 이상의 st.dialog 사용
+@st.dialog('SSP 시나리오란?')
+def show_ssp_dialog():
+    st.markdown('''
+**SSP(Shared Socioeconomic Pathways)**는 미래 사회·경제 발전경로를 가정한
+**공통사회경제경로**입니다. 기후변화 전망에서는 SSP 경로와 온실가스 배출·복사강제력 수준을 함께 사용합니다.
+
+| 기후 시나리오 | 간단한 설명 |
+|---|---|
+| **SSP1-2.6** | 지속가능성을 중시하고 온실가스 배출이 비교적 낮은 경로 |
+| **SSP2-4.5** | 현재와 비슷한 중간 수준의 사회·경제 발전경로 |
+| **SSP3-7.0** | 지역 간 경쟁과 높은 배출이 지속되는 경로 |
+| **SSP5-8.5** | 화석연료 중심의 고배출 경로 |
+
+**뒤의 숫자(2.6, 4.5, 7.0, 8.5)**는 2100년 무렵의 복사강제력 수준(W/m²)을 나타냅니다.
+
+본 지도는 네 가지 **기후** SSP를 비교합니다. 반면 미래 **인구구조**는
+SSP2 국가 인구전망을 공통으로 적용해 기후 시나리오 변화에 따른 차이를 비교합니다.
+    ''')
+
+
+@st.dialog('분석 내용 설명')
+def show_analysis_dialog():
+    st.markdown('''
+**연구 대상 및 기간**
+- 강원특별자치도 18개 시군
+- 기후변화 시나리오 4종, 2020~2090년대(10년 단위)
+
+**폭염 취약성 지수(HVI) 산정**
+- **노출도(E)**: 폭염일수(HW33), 열대야일수(TR25)
+- **민감도(S)**: 65세 이상 인구 비율, 65세 이상 중 75세 이상 비율,
+  독거노인가구 비율, 온열질환 발생률
+- **적응능력(AC)**: 무더위쉼터와 응급의료기관의 인구 대비 공급률
+- **가중치: VESTAP 준용 A안 고정**
+
+**HVI = 0.50 × E + 0.25 × S + 0.25 × (1 − AC)**
+
+**미래 인구 추정 방법**
+- 2025년 실제 인구를 기준으로 2026~2042년 **공식 시군별 추계**를 연결
+- 2043년 이후에는 **IIASA V15 SSP2 전국 인구전망**과 **로짓 기반 인구구조 보정**을 적용
+- 이는 공식 시군별 2090년대 인구전망이 아닌 **본 연구의 조건부 추정값**
+- 시설 **개소 수는 2025년 수준으로 고정**하되, 인구당 공급률은 미래 인구 변화에 따라 달라짐
+
+**해석 시 유의사항**
+- 2020년대 **사회경제 지표는 2025~2029년 평균**, 기후지표의 2020년대 기간과 다름
+- 온열질환 발생률은 2019~2024년 기준값을 유지
+- 네 가지 기후 SSP에 **동일한 SSP2 사회경제·인구 전망**을 적용
+- HVI는 상대적 취약성 지수로 **실제 건강피해 인원을 의미하지 않음**
+    ''')
+
+
 # 앱 시작: 잘못된 데이터로 지도에 임의의 색상을 표시하지 않도록 입력을 먼저 검증
 st.title('강원지역 고령인구 폭염 취약성 Web-GIS')
-st.caption('강원 18개 시군 · 기후변화 SSP 4종 · 2020~2090년대 · VESTAP 준용 A안')
 if not GEO_PATH.exists():
     st.error(f'기존 행정경계 파일을 찾지 못했습니다: {GEO_PATH}')
     st.stop()
@@ -133,10 +186,14 @@ with st.sidebar:
     scenario = st.selectbox('기후변화 시나리오', SCENARIOS, index=3)
     decade = st.selectbox('분석 연대', list(DECADES), index=7)
     metric = st.selectbox('표시 항목', list(METRICS))
-    st.caption('가중치: A안 고정 (E 0.50 · S 0.25 · 1−AC 0.25)')
     st.divider()
     region_selected = st.selectbox('지역별 상세 조회', REGIONS)
-    st.caption('인구는 공식 시군추계 + V15 SSP2 + 로짓 보정을 적용한 추정값입니다.')
+    st.divider()
+    st.subheader('지도 이용 안내')
+    if st.button('SSP 시나리오란?', use_container_width=True, key='ssp_help'):
+        show_ssp_dialog()
+    if st.button('분석 내용 설명', use_container_width=True, key='analysis_help'):
+        show_analysis_dialog()
 
 metric_col = METRICS[metric]
 subset = df[(df['SSP'] == scenario) & (df['연대키'] == DECADES[decade])].copy()
@@ -144,9 +201,6 @@ if len(subset) != 18:
     st.error('선택한 시나리오·연대에 해당하는 18개 시군 자료가 모두 있지 않습니다.')
     st.stop()
 lookup = subset.set_index('시군').to_dict('index')
-
-st.info('2020년대 사회경제 지표는 2025~2029년 평균이며, 기후지표의 2020년대 기간과 다릅니다. '
-        '2043년 이후 시군별 인구는 자체 조건부 추정값입니다.')
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric('대상 행정구역', '18개 시군')
@@ -164,11 +218,13 @@ if hi <= lo:
     hi = lo + 1e-8
 cmap_base = linear.YlGn_09 if metric_col == '적응능력_AC' else linear.YlOrRd_09
 cmap = cmap_base.scale(lo, hi)
-cmap.caption = metric + ' (SSP·연대 공통 색상범위)'
+# 범례는 Folium iframe 바깥에 표시하여 색상 막대와 글이 겹치지 않게 합니다.
+legend_label = f'{metric} · SSP/연대 공통 색상범위'
 
 # 기존 지도 디자인 보존: 흰색 배경, 외부 지도 타일 없음, 행정경계만 표시
 m = folium.Map(location=[37.73, 128.26], zoom_start=8, tiles=None,
-               control_scale=False, zoom_control=True, prefer_canvas=True)
+               control_scale=False, zoom_control=True, prefer_canvas=True,
+               attribution_control=False)
 m.get_root().header.add_child(Element(
     '<style>.leaflet-container {background: #ffffff !important;}</style>'))
 
@@ -236,8 +292,32 @@ class InitialViewportLock(MacroElement):
 
 
 m.add_child(InitialViewportLock(max_additional_steps=3))
-cmap.add_to(m)
+# 색상 막대(LinearColormap)는 지도 레이어로 추가하지 않습니다.
 folium.LayerControl(collapsed=True).add_to(m)
+
+# 지도 위에 독립된 반응형 범례 표시 (지도와 범례가 겹치지 않도록 분리)
+legend_colors = [cmap(lo + (hi - lo) * i / 8) for i in range(9)]
+legend_gradient = 'linear-gradient(to right, ' + ', '.join(legend_colors) + ')'
+legend_ticks = [lo + (hi - lo) * i / 4 for i in range(5)]
+if metric_col in NORMALIZED:
+    legend_tick_text = [f'{value:.2f}' for value in legend_ticks]
+elif metric_col in POPULATION:
+    legend_tick_text = [f'{value:,.0f}' for value in legend_ticks]
+else:
+    legend_tick_text = [f'{value:.1f}' for value in legend_ticks]
+legend_ticks_html = ''.join(f'<span>{escape(value)}</span>' for value in legend_tick_text)
+st.markdown(
+    f'''<div style="max-width:420px;margin:8px 0 10px auto;padding:10px 14px;"
+        >
+          <div style="font-size:13px;font-weight:600;margin-bottom:7px;">
+             {escape(legend_label)}</div>
+          <div style="height:13px;border-radius:3px;border:1px solid #999;
+             background:{legend_gradient};"></div>
+          <div style="display:flex;justify-content:space-between;gap:6px;
+             font-size:11px;margin-top:4px;color:#9ca3af;">
+             {legend_ticks_html}</div>
+        </div>''', unsafe_allow_html=True
+)
 st_folium(m, height=600, use_container_width=True, returned_objects=[])
 
 st.subheader('시군별 비교')
@@ -255,9 +335,10 @@ trend = df[df['시군'] == region_selected].copy()
 trend['연대'] = trend['연대키'].astype(int)
 chart = (trend.pivot(index='연대', columns='SSP', values='HVI_A')
          .reindex(columns=SCENARIOS).sort_index())
-st.line_chart(chart, use_container_width=True)
+chart.index = [f'{int(year)}년대' for year in chart.index]
+st.line_chart(chart, color=SSP_LINE_COLORS, use_container_width=True)
 
 st.divider()
-st.caption('행정경계: SGIS 시군구 경계 (2025년 2분기, 사용자 기존 자료). '
-           '2025년 시설 개소 수 고정. 2043년 이후 시군별 인구는 공식 전망이 아닌 V15 SSP2 기반 연구 추정값. '
-           'HVI는 상대적 취약성 지수이며 실제 건강피해 인원을 예측하지 않습니다.')
+st.caption('지도 엔진: Leaflet · 행정경계: SGIS (2025년 2분기, 사용자 제공). '
+           'HVI는 상대적 취약성 지수이며 실제 건강피해 인원을 나타내지 않습니다. '
+           '자세한 방법과 주의사항은 왼쪽 ‘분석 내용 설명’에서 확인할 수 있습니다.')
