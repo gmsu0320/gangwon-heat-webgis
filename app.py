@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""강원 고령인구 폭염 취약성 Web-GIS 공개 지도 (기본틀).
+"""강원 18개 시군 폭염 취약성 Web-GIS (기존 기본틀 보존 + 최종 HVI 연동).
 
 실행: python -m streamlit run app.py
-데이터 출처: 사용자 제공 2025년 2분기 강원 18개 시군 경계 (SGIS).
+지도 경계: 사용자가 확보한 2025년 2분기 SGIS GeoJSON (data/gangwon_18.geojson)
+분석자료: 최신 방법 3 인구전망을 적용한 A안 HVI 576행
 """
 from pathlib import Path
-from io import BytesIO
 import json
 import re
 import pandas as pd
@@ -18,183 +18,215 @@ from streamlit_folium import st_folium
 st.set_page_config(page_title="강원 고령인구 폭염 취약성 Web-GIS", page_icon="🗺️", layout="wide")
 ROOT = Path(__file__).resolve().parent
 GEO_PATH = ROOT / "data" / "gangwon_18.geojson"
-REGIONS = ['강릉시','고성군','동해시','삼척시','속초시','양구군','양양군','영월군','원주시','인제군','정선군','철원군','춘천시','태백시','평창군','홍천군','화천군','횡성군']
+HVI_PATH = ROOT / "data" / "04_최종HVI_576행.csv"
+REGIONS = ['강릉시','고성군','동해시','삼척시','속초시','양구군','양양군','영월군',
+           '원주시','인제군','정선군','철원군','춘천시','태백시','평창군','홍천군','화천군','횡성군']
 SCENARIOS = ['SSP1-2.6','SSP2-4.5','SSP3-7.0','SSP5-8.5']
+DECADES = {f'{year}년대': str(year) for year in range(2020, 2100, 10)}
+METRICS = {
+    '종합 폭염 취약성 (HVI)': 'HVI_A',
+    '기후 노출도 (E)': '기후노출_E',
+    '민감도 (S)': '민감도_S',
+    '적응능력 (AC)': '적응능력_AC',
+    'HW33 (폭염일수)': 'HW33_일수',
+    'TR25 (열대야일수)': 'TR25_일수',
+    '65세 이상 인구 비율': 'R65_pct',
+    '75세 이상 구성비': 'R75in65_pct',
+    '총인구': '총인구_평균_명',
+    '65세 이상 인구': '65세이상_평균_명',
+    '75세 이상 인구': '75세이상_평균_명',
+}
+NORMALIZED = {'HVI_A','기후노출_E','민감도_S','적응능력_AC'}
+PERCENT = {'R65_pct','R75in65_pct'}
+POPULATION = {'총인구_평균_명','65세이상_평균_명','75세이상_평균_명'}
+DAYS = {'HW33_일수','TR25_일수'}
 
 
-def clean_region(s):
-    return re.sub(r'\s+', '', str(s).replace('강원특별자치도','').replace('강원도','').strip())
+def clean_region(value):
+    return re.sub(r'\s+', '', str(value).replace('강원특별자치도', '')
+                  .replace('강원도', '').strip())
 
 
-def pick_index(columns, tokens):
-    return next((i for i, c in enumerate(columns) if any(t in str(c).lower() for t in tokens)), 0)
+def clean_decade(value):
+    hit = re.search(r'20[2-9]0', str(value))
+    return hit.group() if hit else ''
 
 
-def numeric_columns(df):
-    return [c for c in df.columns if pd.to_numeric(df[c], errors='coerce').notna().any()]
+def format_value(value, col):
+    if pd.isna(value):
+        return '자료 없음'
+    value = float(value)
+    if col in POPULATION:
+        return f'{value:,.0f}명'
+    if col in PERCENT:
+        return f'{value:.1f}%'
+    if col in DAYS:
+        return f'{value:.1f}일'
+    return f'{value:.4f}'
 
 
 @st.cache_data(show_spinner=False)
 def load_boundary():
-    with open(GEO_PATH, encoding='utf-8') as f:
+    with GEO_PATH.open(encoding='utf-8') as f:
         obj = json.load(f)
     features = []
-    for feature in obj['features']:
-        p = feature['properties']
-        name = clean_region(p.get('SIGUNGU_NM', ''))
+    for feature in obj.get('features', []):
+        properties = feature.get('properties', {})
+        name = clean_region(properties.get('SIGUNGU_NM', ''))
         if name in REGIONS:
-            features.append({'type': 'Feature', 'properties': {'region': name, 'code': str(p.get('SIGUNGU_CD',''))}, 'geometry': feature['geometry']})
+            features.append({
+                'type': 'Feature',
+                'properties': {'region': name, 'code': str(properties.get('SIGUNGU_CD', ''))},
+                'geometry': feature['geometry']
+            })
+    if len(features) != 18 or set(f['properties']['region'] for f in features) != set(REGIONS):
+        raise ValueError(f'SGIS 행정경계 18개 확인 실패: {len(features)}개. '
+                         'SIGUNGU_NM 열과 GeoJSON 파일을 점검하세요.')
     return {'type': 'FeatureCollection', 'features': features}
 
 
+@st.cache_data(show_spinner=False)
+def load_hvi():
+    try:
+        df = pd.read_csv(HVI_PATH, encoding='utf-8-sig')
+    except UnicodeDecodeError:
+        df = pd.read_csv(HVI_PATH, encoding='cp949')
+    needed = ['시군','SSP','연대','취약성순위'] + list(METRICS.values())
+    absent = [c for c in needed if c not in df.columns]
+    if absent:
+        raise ValueError('CSV에서 필요한 열을 찾지 못했습니다: ' + ', '.join(absent))
+    df['시군'] = df['시군'].map(clean_region)
+    df['연대키'] = df['연대'].map(clean_decade)
+    for col in ['취약성순위'] + list(METRICS.values()):
+        df[col] = pd.to_numeric(df[col], errors='coerce')
+    if df[needed[3:]].isna().any().any():
+        raise ValueError('분석 지표에 결측 또는 비숫자 값이 있습니다.')
+    keys = ['시군','SSP','연대키']
+    if df.duplicated(keys).any():
+        raise ValueError('시군·SSP·연대 조합이 중복됩니다.')
+    expected = {(r, s, d) for r in REGIONS for s in SCENARIOS for d in DECADES.values()}
+    actual = set(map(tuple, df[keys].itertuples(index=False, name=None)))
+    if len(df) != 576 or actual != expected:
+        raise ValueError(f'분석값 조합 오류: {len(df)}행. '
+                         f'누락 {len(expected - actual)}건, 불필요 {len(actual - expected)}건')
+    return df
+
+
+# 앱 시작: 잘못된 데이터로 지도에 임의의 색상을 표시하지 않도록 입력을 먼저 검증
 st.title('강원지역 고령인구 폭염 취약성 Web-GIS')
-st.caption('기후변화 시나리오별 공간분석 및 미래 전망지도 | 프로젝트용 시연 기본틀')
-st.info('현재는 **행정구역 지도와 분석조건 선택 기능을 시연하는 버전**입니다. HW33·TR25 수치는 CSV 업로드 후 표시되며, 취약성 지수 및 A·B안 계산 결과는 아직 연결되지 않았습니다.')
+st.caption('강원 18개 시군 · 기후변화 SSP 4종 · 2020~2090년대 · VESTAP 준용 A안')
+if not GEO_PATH.exists():
+    st.error(f'기존 행정경계 파일을 찾지 못했습니다: {GEO_PATH}')
+    st.stop()
+if not HVI_PATH.exists():
+    st.error(f'최종 HVI 파일을 찾지 못했습니다: {HVI_PATH}')
+    st.stop()
+try:
+    geo = load_boundary()
+    df = load_hvi()
+except (ValueError, OSError, KeyError, json.JSONDecodeError) as exc:
+    st.error(f'지도 입력자료 검증 실패: {exc}')
+    st.stop()
 
 with st.sidebar:
     st.header('분석 조건')
-    scenario = st.selectbox('기후변화 시나리오', SCENARIOS)
-    decade = st.selectbox('분석 연대', [f'{y}년대' for y in range(2020,2100,10)])
-    metric = st.selectbox('표시 항목', ['행정구역 기본틀','HW33','TR25','폭염 취약성 지수 (준비 중)'])
-    weight = st.selectbox('취약성 지수 가중치', ['A안: E 0.50 / S 0.25 / AC 0.25','B안: 자체 가중치 (산식 확정 후 적용)'])
+    scenario = st.selectbox('기후변화 시나리오', SCENARIOS, index=3)
+    decade = st.selectbox('분석 연대', list(DECADES), index=7)
+    metric = st.selectbox('표시 항목', list(METRICS))
+    st.caption('가중치: A안 고정 (E 0.50 · S 0.25 · 1−AC 0.25)')
     st.divider()
-    st.subheader('기후자료 연결 (선택)')
-    uploaded = st.file_uploader('가공된 HW33 또는 TR25 CSV 업로드', type=['csv'])
-    st.caption('행정구역 기본틀은 파일 없이 바로 표시됩니다. CSV를 업로드하면 열 구조에 맞춰 선택합니다.')
+    region_selected = st.selectbox('지역별 상세 조회', REGIONS)
+    st.caption('인구는 공식 시군추계 + V15 SSP2 + 로짓 보정을 적용한 추정값입니다.')
 
-geo = load_boundary()
-if len(geo['features']) != 18:
-    st.error(f'지도 경계 개수가 18개가 아닙니다: {len(geo["features"])}개. 파일을 확인하세요.')
+metric_col = METRICS[metric]
+subset = df[(df['SSP'] == scenario) & (df['연대키'] == DECADES[decade])].copy()
+if len(subset) != 18:
+    st.error('선택한 시나리오·연대에 해당하는 18개 시군 자료가 모두 있지 않습니다.')
     st.stop()
+lookup = subset.set_index('시군').to_dict('index')
 
-lookup = {}
-value_name = '지표값'
-if metric in ('HW33','TR25') and uploaded is not None:
-    raw = uploaded.getvalue()
-    df = None
-    for enc in ('utf-8-sig','cp949','euc-kr'):
-        try:
-            df = pd.read_csv(BytesIO(raw),encoding=enc)
-            break
-        except UnicodeDecodeError:
-            continue
-        except Exception as exc:
-            st.error(f'CSV 읽기 오류: {exc}')
-            st.stop()
-    if df is None or df.empty:
-        st.error('CSV 파일을 읽을 수 없거나 데이터가 없습니다.')
-        st.stop()
-    columns = list(df.columns)
-    with st.sidebar:
-        st.subheader('CSV 열 지정')
-        region_col = st.selectbox('시군 이름 열',columns,index=pick_index(columns,['시군구','시군','지역명','region']))
-        choices = ['(선택 안 함)'] + columns
-        scenario_col = st.selectbox('SSP 열',choices,index=(1+pick_index(columns,['scenario','시나리오','ssp']) if any(any(t in str(c).lower() for t in ['scenario','시나리오','ssp']) for c in columns) else 0))
-        decade_col = st.selectbox('연대 열',choices,index=(1+pick_index(columns,['decade','연대']) if any(any(t in str(c).lower() for t in ['decade','연대']) for c in columns) else 0))
-        nums = numeric_columns(df)
-        value_col = st.selectbox('실제 지표값 열', nums) if nums else None
-    if not value_col:
-        st.warning('숫자로 해석할 수 있는 열을 찾지 못했습니다.')
-    else:
-        d = df.copy()
-        d['_region'] = d[region_col].map(clean_region)
-        if scenario_col != '(선택 안 함)':
-            d = d[d[scenario_col].astype(str).str.upper().str.replace(r'[^0-9A-Z]','',regex=True).eq(re.sub(r'[^0-9A-Z]','',scenario.upper()))]
-        else:
-            st.warning('SSP 시나리오 열을 지정하지 않아 시나리오 필터가 적용되지 않습니다.')
-        if decade_col != '(선택 안 함)':
-            d = d[d[decade_col].astype(str).str.contains(decade[:4],regex=False,na=False)]
-        else:
-            st.warning('연대 열을 지정하지 않아 연대 필터가 적용되지 않습니다.')
-        d['_value'] = pd.to_numeric(d[value_col], errors='coerce')
-        d = d[d['_region'].isin(REGIONS) & d['_value'].notna()]
-        duplicates = d['_region'].duplicated(keep=False)
-        if duplicates.any():
-            st.warning('같은 선택 조건에서 중복된 시군이 있습니다. 중복 시군 값은 임의 평균하지 않고 제외합니다.')
-            d = d[~duplicates]
-        lookup = dict(zip(d['_region'],d['_value']))
-        value_name = str(value_col)
+st.info('2020년대 사회경제 지표는 2025~2029년 평균이며, 기후지표의 2020년대 기간과 다릅니다. '
+        '2043년 이후 시군별 인구는 자체 조건부 추정값입니다.')
 
-if metric == '폭염 취약성 지수 (준비 중)':
-    st.warning('취약성 지수 데이터가 아직 연결되지 않았습니다. 가중치 선택은 화면 구조 확인용입니다.')
-elif metric in ('HW33','TR25') and not lookup:
-    st.info('분석값은 아직 표시되지 않습니다. 왼쪽에 해당 지표 CSV를 업로드하고 열을 지정하세요.')
+c1, c2, c3, c4 = st.columns(4)
+c1.metric('대상 행정구역', '18개 시군')
+c2.metric('기후 시나리오', scenario)
+c3.metric('분석 연대', decade)
+c4.metric('18개 시군 평균 HVI', f"{subset['HVI_A'].mean():.4f}")
 
-with st.container():
-    c1,c2,c3,c4 = st.columns(4)
-    c1.metric('대상 행정구역', '18개 시군')
-    c2.metric('SSP 시나리오', scenario)
-    c3.metric('분석 연대', decade)
-    c4.metric('지표 연결', f'{len(lookup)}/18개')
+# 동일 지표의 SSP/연대별 색상 비교가 가능하도록 범례는 전체 분석기간에 고정
+if metric_col in NORMALIZED:
+    lo, hi = 0.0, 1.0
+else:
+    lo = float(df[metric_col].min())
+    hi = float(df[metric_col].max())
+if hi <= lo:
+    hi = lo + 1e-8
+cmap_base = linear.YlGn_09 if metric_col == '적응능력_AC' else linear.YlOrRd_09
+cmap = cmap_base.scale(lo, hi)
+cmap.caption = metric + ' (SSP·연대 공통 색상범위)'
 
-# 강원 행정구역만 표시: 배경 타일(도로/바다/다른 지역) 제거
-m = folium.Map(location=[37.73, 128.26], zoom_start=8, tiles=None, control_scale=False, zoom_control=True, prefer_canvas=True)
-# Leaflet 지도 영역의 바탕을 흰색으로 지정
-m.get_root().header.add_child(Element('<style>.leaflet-container {background: #ffffff !important;}</style>'))
-vals = list(lookup.values())
-cmap = None
-if vals:
-    lo,hi = min(vals),max(vals)
-    cmap = linear.YlOrRd_09.scale(lo, hi if hi > lo else lo+1e-9)
-    cmap.caption = value_name
+# 기존 지도 디자인 보존: 흰색 배경, 외부 지도 타일 없음, 행정경계만 표시
+m = folium.Map(location=[37.73, 128.26], zoom_start=8, tiles=None,
+               control_scale=False, zoom_control=True, prefer_canvas=True)
+m.get_root().header.add_child(Element(
+    '<style>.leaflet-container {background: #ffffff !important;}</style>'))
 
 for f in geo['features']:
     name = f['properties']['region']
-    val = lookup.get(name)
-    f['properties']['display_value'] = f'{val:.4g}' if val is not None else '데이터 미연결'
+    item = lookup.get(name)
+    val = item[metric_col] if item else None
     f['properties']['value'] = float(val) if val is not None else None
+    f['properties']['display_value'] = format_value(val, metric_col)
+    f['properties']['rank'] = str(int(item['취약성순위'])) if item else '-'
+    f['properties']['hvi'] = format_value(item['HVI_A'], 'HVI_A') if item else '-'
+
 
 def style(feature):
-    v = feature['properties'].get('value')
-    return {'fillColor': cmap(v) if (cmap is not None and v is not None) else '#d9e4ee',
-            'color':'#526474','weight':1.5,'fillOpacity':0.90}
+    value = feature['properties'].get('value')
+    return {'fillColor': cmap(value) if value is not None else '#d9e4ee',
+            'color':'#526474', 'weight':1.5, 'fillOpacity':0.90}
 
-boundary_layer = folium.GeoJson(geo,name='강원 18개 시군',style_function=style,
-    highlight_function=lambda feature: {'weight':3,'color':'#1f2937','fillOpacity':0.9},
-    tooltip=folium.GeoJsonTooltip(fields=['region','display_value'],aliases=['시군: ', f'{value_name}: ']),
-    popup=folium.GeoJsonPopup(fields=['region','code','display_value'],aliases=['시군: ','행정구역 코드: ',f'{value_name}: '])
+
+boundary_layer = folium.GeoJson(
+    geo, name='강원 18개 시군', style_function=style,
+    highlight_function=lambda feature: {'weight':3, 'color':'#1f2937', 'fillOpacity':0.9},
+    tooltip=folium.GeoJsonTooltip(fields=['region','display_value'],
+                                  aliases=['시군: ',f'{metric}: ']),
+    popup=folium.GeoJsonPopup(fields=['region','code','display_value','hvi','rank'],
+                              aliases=['시군: ','행정구역 코드: ',f'{metric}: ',
+                                       'HVI: ','HVI 취약성 순위: '])
 ).add_to(m)
-# 모든 시군 경계가 현재 화면에 들어오도록 자동 맞춤
 m.fit_bounds(boundary_layer.get_bounds(), padding=(24, 24))
 
-# 처음 화면에서 지도를 중앙 고정하고, 확대 시에만 지정 범위 안에서 이동을 허용합니다.
-# 지도 경계는 처음 맞춤 화면의 전체 영역(흰색 여백 포함)으로 설정합니다.
+# 이전 지도에서 사용한 초기 화면 고정·확대 이후 이동 허용 설정을 변경 없이 유지
 class InitialViewportLock(MacroElement):
-    def __init__(self, max_additional_steps=4):
+    def __init__(self, max_additional_steps=3):
         super().__init__()
-        self._name = "InitialViewportLock"
+        self._name = 'InitialViewportLock'
         self.max_additional_steps = int(max_additional_steps)
         self._template = Template("""
         {% macro script(this, kwargs) %}
         (function () {
             var map = {{ this._parent.get_name() }};
             map.whenReady(function () {
-                // fitBounds가 정한 초기 확대 수준과 중심을 저장
                 var baseZoom = map.getZoom();
                 var homeCenter = map.getCenter();
                 var homeBounds = map.getBounds();
-
-                // 기본 크기보다 축소 금지, 기본 크기에서 4단계 확대 허용
                 map.setMinZoom(baseZoom);
                 map.setMaxZoom(baseZoom + {{ this.max_additional_steps }});
-
-                // 처음 화면 바깥으로 이동하지 않도록 완전한 경계 제한
                 map.setMaxBounds(homeBounds);
                 map.options.maxBoundsViscosity = 1.0;
-
                 function updateInteraction() {
                     if (map.getZoom() <= baseZoom + 0.001) {
-                        // 기본 크기에서는 중심으로 복귀하고 드래그 이동 잠금
                         map.panTo(homeCenter, {animate: false});
                         map.dragging.disable();
                         map.keyboard.disable();
                     } else {
-                        // 확대 후에는 처음 화면 범위 안에서만 이동 가능
                         map.dragging.enable();
                         map.keyboard.enable();
                     }
                 }
-
                 map.on('zoomend', updateInteraction);
                 updateInteraction();
             });
@@ -203,23 +235,29 @@ class InitialViewportLock(MacroElement):
         """)
 
 
-# 자동 맞춤 뒤에 적용하며, 마우스·터치 이동 경계도 함께 제한
 m.add_child(InitialViewportLock(max_additional_steps=4))
-
-if cmap is not None:
-    cmap.add_to(m)
+cmap.add_to(m)
 folium.LayerControl(collapsed=True).add_to(m)
 st_folium(m, height=600, use_container_width=True, returned_objects=[])
 
-st.subheader('시군별 자료')
-table = pd.DataFrame({'시군':REGIONS, value_name:[lookup.get(region) for region in REGIONS]})
-if lookup:
-    table = table.sort_values(value_name, ascending=False, na_position='last')
+st.subheader('시군별 비교')
+table = subset[['시군','취약성순위','HVI_A','HW33_일수','TR25_일수',
+                'R65_pct','R75in65_pct','총인구_평균_명','65세이상_평균_명',
+                '75세이상_평균_명']].sort_values('취약성순위').copy()
 st.dataframe(table, hide_index=True, use_container_width=True)
-if lookup:
-    st.download_button('선택한 시군별 자료 CSV 다운로드',table.to_csv(index=False).encode('utf-8-sig'),file_name='gangwon_selected_data.csv',mime='text/csv')
-else:
-    st.caption('시군별 수치가 연결되기 전에는 임의의 폭염 또는 취약성 값을 채우지 않습니다.')
+st.download_button('현재 SSP·연대 데이터 CSV 다운로드',
+                   data=subset.drop(columns=['연대키']).to_csv(index=False).encode('utf-8-sig'),
+                   file_name=f'HeatCare_{scenario}_{DECADES[decade]}.csv',
+                   mime='text/csv')
+
+st.subheader(f'{region_selected} — SSP별 HVI 장기 변화')
+trend = df[df['시군'] == region_selected].copy()
+trend['연대'] = trend['연대키'].astype(int)
+chart = (trend.pivot(index='연대', columns='SSP', values='HVI_A')
+         .reindex(columns=SCENARIOS).sort_index())
+st.line_chart(chart, use_container_width=True)
 
 st.divider()
-st.caption('경계자료: 사용자 제공 SGIS 시군구 경계 2025년 2분기 (기준일 2025-06-30). 공개 기본틀은 데이터 미연결 상태에서도 지도를 보여줍니다.')
+st.caption('행정경계: SGIS 시군구 경계 (2025년 2분기, 사용자 기존 자료). '
+           '2025년 시설 개소 수 고정. 2043년 이후 시군별 인구는 공식 전망이 아닌 V15 SSP2 기반 연구 추정값. '
+           'HVI는 상대적 취약성 지수이며 실제 건강피해 인원을 예측하지 않습니다.')
