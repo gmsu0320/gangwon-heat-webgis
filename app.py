@@ -225,8 +225,18 @@ legend_label = f'{metric} · SSP/연대 공통 색상범위'
 m = folium.Map(location=[37.73, 128.26], zoom_start=8, tiles=None,
                control_scale=False, zoom_control=True, prefer_canvas=True,
                attribution_control=False)
-m.get_root().header.add_child(Element(
-    '<style>.leaflet-container {background: #ffffff !important;}</style>'))
+# 지도 배경 흰색 유지 + 지도 화면 외곽 테두리 추가
+m.get_root().header.add_child(
+    Element("""
+    <style>
+    .leaflet-container {
+        background: #ffffff !important;
+        border: 1px solid #333333 !important;
+        box-sizing: border-box;
+    }
+    </style>
+    """)
+)
 
 for f in geo['features']:
     name = f['properties']['region']
