@@ -10,6 +10,7 @@ from html import escape
 import json
 import re
 import pandas as pd
+import altair as alt
 import folium
 import streamlit as st
 from branca.colormap import linear
@@ -119,7 +120,7 @@ def load_hvi():
 @st.dialog('SSP 시나리오란?')
 def show_ssp_dialog():
     st.markdown('''
-**SSP(Shared Socioeconomic Pathways)**는 미래 사회·경제 발전경로를 가정한
+** SSP(Shared Socioeconomic Pathways) **는 미래 사회·경제 발전경로를 가정한
 **공통사회경제경로**입니다. 기후변화 전망에서는 SSP 경로와 온실가스 배출·복사강제력 수준을 함께 사용합니다.
 
 | 기후 시나리오 | 간단한 설명 |
@@ -129,7 +130,7 @@ def show_ssp_dialog():
 | **SSP3-7.0** | 지역 간 경쟁과 높은 배출이 지속되는 경로 |
 | **SSP5-8.5** | 화석연료 중심의 고배출 경로 |
 
-**뒤의 숫자(2.6, 4.5, 7.0, 8.5)**는 2100년 무렵의 복사강제력 수준(W/m²)을 나타냅니다.
+뒤의 숫자(2.6, 4.5, 7.0, 8.5)는 2100년 무렵의 복사강제력 수준(W/m²)을 나타냅니다.
 
 본 지도는 네 가지 **기후** SSP를 비교합니다. 반면 미래 **인구구조**는
 SSP2 국가 인구전망을 공통으로 적용해 기후 시나리오 변화에 따른 차이를 비교합니다.
@@ -148,7 +149,6 @@ def show_analysis_dialog():
 - **민감도(S)**: 65세 이상 인구 비율, 65세 이상 중 75세 이상 비율,
   독거노인가구 비율, 온열질환 발생률
 - **적응능력(AC)**: 무더위쉼터와 응급의료기관의 인구 대비 공급률
-- **가중치: VESTAP 준용 A안 고정**
 
 **HVI = 0.50 × E + 0.25 × S + 0.25 × (1 − AC)**
 
@@ -332,11 +332,40 @@ st.download_button('현재 SSP·연대 데이터 CSV 다운로드',
 
 st.subheader(f'{region_selected} — SSP별 HVI 장기 변화')
 trend = df[df['시군'] == region_selected].copy()
-trend['연대'] = trend['연대키'].astype(int)
-chart = (trend.pivot(index='연대', columns='SSP', values='HVI_A')
-         .reindex(columns=SCENARIOS).sort_index())
-chart.index = [f'{int(year)}년대' for year in chart.index]
-st.line_chart(chart, color=SSP_LINE_COLORS, use_container_width=True)
+trend['연대표시'] = trend['연대키'].astype(str) + '년대'
+
+# Altair를 사용해 X축 연대 라벨을 항상 가로(0도)로 표시합니다.
+# 색상은 기존 SSP_LINE_COLORS 설정을 그대로 사용합니다.
+line_chart = (
+    alt.Chart(trend)
+    .mark_line(strokeWidth=2.7)
+    .encode(
+        x=alt.X(
+            '연대표시:N',
+            sort=list(DECADES.keys()),
+            axis=alt.Axis(
+                title=None,
+                labelAngle=0,       # 2020년대 ~ 2090년대를 가로로 표시
+                labelOverlap=False,
+                labelLimit=90,
+                labelPadding=9,
+            ),
+        ),
+        y=alt.Y('HVI_A:Q', title='폭염 취약성 지수 (HVI)', scale=alt.Scale(zero=True)),
+        color=alt.Color(
+            'SSP:N',
+            scale=alt.Scale(domain=SCENARIOS, range=SSP_LINE_COLORS),
+            legend=alt.Legend(title=None, orient='bottom'),
+        ),
+        tooltip=[
+            alt.Tooltip('연대표시:N', title='연대'),
+            alt.Tooltip('SSP:N', title='시나리오'),
+            alt.Tooltip('HVI_A:Q', title='HVI', format='.4f'),
+        ],
+    )
+    .properties(height=330)
+)
+st.altair_chart(line_chart, use_container_width=True)
 
 st.divider()
 st.caption('지도 엔진: Leaflet · 행정경계: SGIS (2025년 2분기, 사용자 제공). '
