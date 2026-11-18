@@ -120,7 +120,7 @@ def load_hvi():
 @st.dialog('SSP 시나리오란?')
 def show_ssp_dialog():
     st.markdown('''
-**SSP(Shared Socioeconomic Pathways)**는 미래 사회·경제 발전경로를 가정한
+<strong>SSP(Shared Socioeconomic Pathways)</strong>는 미래 사회·경제 발전경로를 가정한
 **공통사회경제경로**입니다. 기후변화 전망에서는 SSP 경로와 온실가스 배출·복사강제력 수준을 함께 사용합니다.
 
 | 기후 시나리오 | 간단한 설명 |
