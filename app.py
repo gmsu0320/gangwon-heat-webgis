@@ -15,6 +15,7 @@ import folium
 import streamlit as st
 from branca.colormap import linear
 from branca.element import Element, MacroElement, Template
+from shapely.geometry import shape
 from streamlit_folium import st_folium
 
 st.set_page_config(page_title="강원 고령인구 폭염 취약성 Web-GIS", page_icon="🗺️", layout="wide")
@@ -32,16 +33,19 @@ METRICS = {
     '기후 노출도 (E)': '기후노출_E',
     '민감도 (S)': '민감도_S',
     '적응능력 (AC)': '적응능력_AC',
-    'HW33 (폭염일수)': 'HW33_일수',
-    'TR25 (열대야일수)': 'TR25_일수',
+    '폭염일수 (HW33)': 'HW33_일수',
+    '열대야일수 (TR25)': 'TR25_일수',
     '65세 이상 인구 비율': 'R65_pct',
     '75세 이상 구성비': 'R75in65_pct',
     '총인구': '총인구_평균_명',
     '65세 이상 인구': '65세이상_평균_명',
     '75세 이상 인구': '75세이상_평균_명',
+    '독거노인가구 비율': '독거노인가구비율_pct',
+    '무더위쉼터 공급률': '무더위쉼터_고령1000명당',
+    '응급의료기관 공급률': '응급의료기관_총인구10만명당',
 }
 NORMALIZED = {'HVI_A','기후노출_E','민감도_S','적응능력_AC'}
-PERCENT = {'R65_pct','R75in65_pct'}
+PERCENT = {'R65_pct','R75in65_pct','독거노인가구비율_pct'}
 POPULATION = {'총인구_평균_명','65세이상_평균_명','75세이상_평균_명'}
 DAYS = {'HW33_일수','TR25_일수'}
 
@@ -66,6 +70,8 @@ def format_value(value, col):
         return f'{value:.1f}%'
     if col in DAYS:
         return f'{value:.1f}일'
+    if col in {'무더위쉼터_고령1000명당','응급의료기관_총인구10만명당'}:
+        return f'{value:.2f}개소'
     return f'{value:.4f}'
 
 
@@ -203,7 +209,9 @@ def show_hvi_dialog():
 
 **① 기후 노출도(E)** — 얼마나 더운 날이 많은가?
 - **HW33:** 일 최고기온 33℃ 이상인 날의 수(폭염일수)
-- **TR25:** 일 최저기온 25℃ 이상인 날의 수(열대야일수)
+- **TR25:** 일 최저기온 25℃ 이상인 날의 수(본 연구의 열대야일수 지표)
+- 두 일수를 단순 합산하지 않습니다. 전체 자료에서 각각 0~1로 Min–Max 정규화한 뒤, 폭염일수 72.22%, 열대야일수 27.78%를 반영합니다.
+- 정규화란 단위와 범위가 다른 값을 공통 척도로 바꾸는 과정입니다.
 
 **② 민감도(S)** — 폭염에 영향을 받기 쉬운 특성이 얼마나 큰가?
 - 65세 이상 인구 비율, 65세 이상 중 75세 이상 비율
@@ -281,8 +289,9 @@ if not HVI_PATH.exists():
     st.error(f'최종 HVI 파일을 찾지 못했습니다: {HVI_PATH}')
     st.stop()
 try:
-    geo = load_boundary()
-    df = load_hvi()
+    with st.spinner('행정경계와 폭염 취약성 자료를 불러오는 중입니다…'):
+        geo = load_boundary()
+        df = load_hvi()
 except (ValueError, OSError, KeyError, json.JSONDecodeError) as exc:
     st.error(f'지도 입력자료 검증 실패: {exc}')
     st.stop()
@@ -300,6 +309,7 @@ with st.sidebar:
     scenario = st.selectbox('기후변화 시나리오', SCENARIOS, index=3)
     decade = st.selectbox('분석 연대', list(DECADES), index=7)
     metric = st.selectbox('표시 항목', list(METRICS))
+    show_names = st.checkbox('지도에 시군명 표시', value=True)
     st.divider()
     region_selected = st.selectbox('지역별 상세 조회', REGIONS, key='selected_region_widget')
     st.divider()
@@ -370,6 +380,24 @@ boundary_layer = folium.GeoJson(
                                        'HVI: ','HVI 취약성 순위: '])
 ).add_to(m)
 m.fit_bounds(boundary_layer.get_bounds(), padding=(24, 24))
+if show_names:
+    for feature in geo['features']:
+        geom = shape(feature['geometry'])
+        if geom.geom_type == 'MultiPolygon':
+            geom = max(geom.geoms, key=lambda p: p.area)
+        pt = geom.representative_point()
+        name = escape(feature['properties']['region'])
+        folium.Marker(
+            [pt.y, pt.x],
+            icon=folium.DivIcon(
+                icon_size=(60, 18), icon_anchor=(30, 9),
+                class_name='region-name-label',
+                html=f'<div style="text-align:center;font-size:11px;font-weight:700;color:#17212c;white-space:nowrap;text-shadow:1px 1px 2px white,-1px -1px 2px white;">{name}</div>'
+            ), interactive=False, keyboard=False
+        ).add_to(m)
+    m.get_root().header.add_child(Element(
+        '<style>.region-name-label {pointer-events:none !important; background:transparent; border:none;}</style>'))
+
 
 # 이전 지도에서 사용한 초기 화면 고정·확대 이후 이동 허용 설정을 변경 없이 유지
 class InitialViewportLock(MacroElement):
@@ -436,18 +464,19 @@ st.markdown(
 )
 # 시군 폴리곤을 클릭하면 클릭 지점과 클릭 횟수를 Streamlit으로 반환함.
 # SSP/연대/표시 지표별 별도 키를 사용해 과거 클릭이 다른 조건에 재적용되는 문제 방지.
-map_view_key = f"heatcare_map_{scenario}_{DECADES[decade]}_{metric_col}"
-map_response = st_folium(
-    m,
-    height=600,
-    use_container_width=True,
-    key=map_view_key,
-    returned_objects=[
-        'last_object_clicked',
-        'last_object_clicked_count',
-        'last_object_clicked_tooltip',
-    ],
-)
+map_view_key = f"heatcare_map_{scenario}_{DECADES[decade]}_{metric_col}_{show_names}"
+with st.spinner('선택한 조건의 지도를 구성하는 중입니다…'):
+    map_response = st_folium(
+        m,
+        height=600,
+        use_container_width=True,
+        key=map_view_key,
+        returned_objects=[
+            'last_object_clicked',
+            'last_object_clicked_count',
+            'last_object_clicked_tooltip',
+        ],
+    )
 
 # 클릭을 지도 선택값과 연동하고 그래프를 자동으로 갱신.
 # 같은 클릭으로 반복 재실행되지 않도록 화면별로 마지막 이벤트를 저장함.
@@ -469,11 +498,67 @@ st.subheader('시군별 비교')
 table = subset[['시군','취약성순위','HVI_A','HW33_일수','TR25_일수',
                 'R65_pct','R75in65_pct','총인구_평균_명','65세이상_평균_명',
                 '75세이상_평균_명']].sort_values('취약성순위').copy()
-st.dataframe(table, hide_index=True, use_container_width=True)
+table_labels = {
+    'HVI_A': '종합 폭염 취약성', 'HW33_일수': '폭염일수 (일)',
+    'TR25_일수': '열대야일수 (일)', 'R65_pct': '65세 이상 비율 (%)',
+    'R75in65_pct': '65세 이상 중 75세 이상 (%)', '총인구_평균_명': '총인구 (명)',
+    '65세이상_평균_명': '65세 이상 인구 (명)', '75세이상_평균_명': '75세 이상 인구 (명)',
+    '기후노출_E': '기후 노출도', '민감도_S': '민감도', '적응능력_AC': '적응능력'
+}
+for col in ['기후노출_E','민감도_S','적응능력_AC']:
+    table[col] = subset.loc[table.index, col]
+st.dataframe(table.rename(columns=table_labels), hide_index=True, use_container_width=True)
 st.download_button('현재 SSP·연대 데이터 CSV 다운로드',
                    data=subset.drop(columns=['연대키']).to_csv(index=False).encode('utf-8-sig'),
                    file_name=f'HeatCare_{scenario}_{DECADES[decade]}.csv',
                    mime='text/csv')
+
+st.subheader(f'{region_selected} — 여러 지표 비교')
+st.caption(f'{scenario} · {decade} | 지도 또는 왼쪽 메뉴에서 지역을 바꾸면 함께 갱신됩니다.')
+metric_help = {
+    'HVI_A': '폭염에 대한 상대적 취약성. 높을수록 취약합니다.',
+    '기후노출_E': '정규화한 폭염일수 72.22%와 열대야일수 27.78%의 가중합입니다.',
+    '민감도_S': '고령인구, 독거노인가구, 온열질환 발생률을 반영한 상대적 민감도입니다.',
+    '적응능력_AC': '인구 대비 무더위쉼터와 응급의료기관 공급 여건. 높을수록 대응능력이 좋습니다.',
+    'HW33_일수': '일 최고기온 33℃ 이상인 날의 연평균 일수입니다.',
+    'TR25_일수': '일 최저기온 25℃ 이상인 날의 연평균 일수(연구 지표)입니다.',
+    'R65_pct': '전체 인구 중 65세 이상 인구 비율입니다.',
+    'R75in65_pct': '65세 이상 인구 중 75세 이상 인구 비율입니다.',
+    '독거노인가구비율_pct': '자료에 수록된 독거노인가구 비율입니다.',
+    '무더위쉼터_고령1000명당': '65세 이상 인구 1,000명당 무더위쉼터 개소 수입니다.',
+    '응급의료기관_총인구10만명당': '전체 인구 10만 명당 응급의료기관 개소 수입니다.'
+}
+chosen = st.multiselect('비교할 지표 (최대 6개)', list(METRICS),
+    default=['종합 폭염 취약성 (HVI)','기후 노출도 (E)','폭염일수 (HW33)','열대야일수 (TR25)'],
+    max_selections=6)
+if not chosen:
+    st.info('비교할 지표를 한 개 이상 선택하세요.')
+region_trend = df[df['시군'] == region_selected].copy()
+region_trend['연대표시'] = region_trend['연대키'].astype(str) + '년대'
+for i in range(0, len(chosen), 2):
+    cols = st.columns(2)
+    for panel, label in zip(cols, chosen[i:i+2]):
+        col = METRICS[label]
+        with panel:
+            st.metric(label, format_value(lookup[region_selected][col], col),
+                      help=metric_help.get(col, '선택 연대의 평균 인구수입니다.'))
+            unit = ('일' if col in DAYS else '%' if col in PERCENT else '명' if col in POPULATION
+                    else '0~1 지수' if col in NORMALIZED else '인구 대비 개소 수')
+            scale = alt.Scale(domain=[0,1]) if col in NORMALIZED else alt.Scale(zero=True)
+            chart = alt.Chart(region_trend).mark_line(point=True).encode(
+                x=alt.X('연대표시:N', sort=list(DECADES), axis=alt.Axis(title=None,labelAngle=0)),
+                y=alt.Y(f'{col}:Q', title=unit, scale=scale),
+                color=alt.Color('SSP:N', scale=alt.Scale(domain=SCENARIOS,range=SSP_LINE_COLORS),
+                                legend=alt.Legend(title=None,orient='bottom')),
+                tooltip=[alt.Tooltip('연대표시:N',title='연대'),alt.Tooltip('SSP:N'),
+                         alt.Tooltip(f'{col}:Q',title=label,format='.2f')]
+            ).properties(height=220)
+            st.altair_chart(chart, use_container_width=True)
+with st.expander('지표별 설명 및 계산 방법'):
+    for label, col in METRICS.items():
+        st.markdown(f'**{label}** — {metric_help.get(col, "선택 연대의 평균 인구수입니다.")}')
+    st.markdown('**종합 계산식:** HVI = 0.50 × E + 0.25 × S + 0.25 × (1 − AC). 원자료 일수를 단순 합산하지 않습니다.')
+    st.caption('인구 및 시설 전망은 기후 SSP별로 동일한 사회경제 가정을 사용합니다. 단위가 다른 지표는 별도의 그래프로 표시합니다.')
 
 st.subheader(f'{region_selected} — SSP별 HVI 장기 변화')
 trend = df[df['시군'] == region_selected].copy()
