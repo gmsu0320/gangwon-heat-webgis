@@ -48,6 +48,8 @@ NORMALIZED = {'HVI_A','기후노출_E','민감도_S','적응능력_AC'}
 PERCENT = {'R65_pct','R75in65_pct','독거노인가구비율_pct'}
 POPULATION = {'총인구_평균_명','65세이상_평균_명','75세이상_평균_명'}
 DAYS = {'HW33_일수','TR25_일수'}
+CLIMATE_METRICS = {'HVI_A', '기후노출_E', 'HW33_일수', 'TR25_일수'}
+COMMON_LINE_COLOR = '#10B981'
 
 
 def clean_region(value):
@@ -515,6 +517,7 @@ st.download_button('현재 SSP·연대 데이터 CSV 다운로드',
 
 st.subheader(f'{region_selected} — 여러 지표 비교')
 st.caption(f'{scenario} · {decade} | 지도 또는 왼쪽 메뉴에서 지역을 바꾸면 함께 갱신됩니다.')
+st.caption('기후 관련 지표는 SSP 4종을 비교하고, 사회경제적 지표는 모든 기후 SSP에 공통 적용되는 전망을 단일 선으로 표시합니다.')
 metric_help = {
     'HVI_A': '폭염에 대한 상대적 취약성. 높을수록 취약합니다.',
     '기후노출_E': '정규화한 폭염일수 72.22%와 열대야일수 27.78%의 가중합입니다.',
@@ -545,13 +548,29 @@ for i in range(0, len(chosen), 2):
             unit = ('일' if col in DAYS else '%' if col in PERCENT else '명' if col in POPULATION
                     else '0~1 지수' if col in NORMALIZED else '인구 대비 개소 수')
             scale = alt.Scale(domain=[0,1]) if col in NORMALIZED else alt.Scale(zero=True)
-            chart = alt.Chart(region_trend).mark_line(point=True).encode(
+            common = col not in CLIMATE_METRICS
+            plot_data = region_trend
+            if common:
+                # 공통 전망이 실제로 동일한지 확인한 뒤 연대별 1행만 표시
+                same = region_trend.groupby('연대키')[col].nunique().le(1).all()
+                if not same:
+                    st.warning('기후 SSP별 값이 서로 달라 개별 시나리오로 표시합니다.')
+                    common = False
+                else:
+                    plot_data = region_trend.loc[region_trend['SSP'] == 'SSP2-4.5'].copy()
+                    plot_data['전망구분'] = '공통 사회경제 전망'
+            precision = ',.0f' if col in POPULATION else '.4f' if col in NORMALIZED else '.1f' if col in DAYS or col in PERCENT else '.2f'
+            color = (alt.Color('전망구분:N', scale=alt.Scale(domain=['공통 사회경제 전망'], range=[COMMON_LINE_COLOR]),
+                               legend=alt.Legend(title=None, orient='bottom')) if common else
+                     alt.Color('SSP:N', scale=alt.Scale(domain=SCENARIOS, range=SSP_LINE_COLORS),
+                               legend=alt.Legend(title=None, orient='bottom')))
+            chart = alt.Chart(plot_data).mark_line(point=True).encode(
                 x=alt.X('연대표시:N', sort=list(DECADES), axis=alt.Axis(title=None,labelAngle=0)),
                 y=alt.Y(f'{col}:Q', title=unit, scale=scale),
-                color=alt.Color('SSP:N', scale=alt.Scale(domain=SCENARIOS,range=SSP_LINE_COLORS),
-                                legend=alt.Legend(title=None,orient='bottom')),
-                tooltip=[alt.Tooltip('연대표시:N',title='연대'),alt.Tooltip('SSP:N'),
-                         alt.Tooltip(f'{col}:Q',title=label,format='.2f')]
+                color=color,
+                tooltip=[alt.Tooltip('연대표시:N',title='연대'),
+                         alt.Tooltip('전망구분:N', title='전망') if common else alt.Tooltip('SSP:N', title='기후 시나리오'),
+                         alt.Tooltip(f'{col}:Q',title=label,format=precision)]
             ).properties(height=220)
             st.altair_chart(chart, use_container_width=True)
 with st.expander('지표별 설명 및 계산 방법'):
