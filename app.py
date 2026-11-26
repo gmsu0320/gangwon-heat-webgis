@@ -8,6 +8,7 @@
 from pathlib import Path
 from html import escape
 import json
+import math
 import re
 import pandas as pd
 import altair as alt
@@ -50,6 +51,33 @@ POPULATION = {'총인구_평균_명','65세이상_평균_명','75세이상_평�
 DAYS = {'HW33_일수','TR25_일수'}
 CLIMATE_METRICS = {'HVI_A', '기후노출_E', 'HW33_일수', 'TR25_일수'}
 COMMON_LINE_COLOR = '#10B981'
+
+
+def common_y_axis(data, col):
+    """전체 시군·SSP·연대 기준으로 동일 지표의 범위와 눈금을 고정."""
+    if col in NORMALIZED:
+        upper, step = 1.0, 0.2
+    elif col in PERCENT:
+        upper, step = 100, 20
+    else:
+        maximum = float(data[col].max())
+        target = maximum / 5 if maximum > 0 else 1.0
+        magnitude = 10 ** math.floor(math.log10(target))
+        step = next(magnitude * factor for factor in (1, 2, 2.5, 5, 10)
+                    if magnitude * factor >= target)
+        if col in DAYS or col in POPULATION:
+            step = max(1, math.ceil(step))
+        upper = step * math.ceil(maximum / step) if maximum > 0 else step * 5
+    ticks = [round(i * step, 10) for i in range(round(upper / step) + 1)]
+    return [0, upper], ticks
+
+
+def fixed_y(data, col, title):
+    domain, ticks = common_y_axis(data, col)
+    fmt = '.1f' if col in NORMALIZED else ',.0f' if col in POPULATION else '~g'
+    return alt.Y(f'{col}:Q', title=title,
+                 scale=alt.Scale(domain=domain, nice=False, zero=True),
+                 axis=alt.Axis(values=ticks, format=fmt, labelOverlap=False))
 
 
 def clean_region(value):
@@ -518,6 +546,7 @@ st.download_button('현재 SSP·연대 데이터 CSV 다운로드',
 st.subheader(f'{region_selected} — 여러 지표 비교')
 st.caption(f'{scenario} · {decade} | 지도 또는 왼쪽 메뉴에서 지역을 바꾸면 함께 갱신됩니다.')
 st.caption('기후 관련 지표는 SSP 4종을 비교하고, 사회경제적 지표는 모든 기후 SSP에 공통 적용되는 전망을 단일 선으로 표시합니다.')
+st.caption('동일 지표의 세로축 범위와 눈금은 전체 시군·SSP·연대에서 동일합니다.')
 metric_help = {
     'HVI_A': '폭염에 대한 상대적 취약성. 높을수록 취약합니다.',
     '기후노출_E': '정규화한 폭염일수 72.22%와 열대야일수 27.78%의 가중합입니다.',
@@ -547,7 +576,6 @@ for i in range(0, len(chosen), 2):
                       help=metric_help.get(col, '선택 연대의 평균 인구수입니다.'))
             unit = ('일' if col in DAYS else '%' if col in PERCENT else '명' if col in POPULATION
                     else '0~1 지수' if col in NORMALIZED else '인구 대비 개소 수')
-            scale = alt.Scale(domain=[0,1]) if col in NORMALIZED else alt.Scale(zero=True)
             common = col not in CLIMATE_METRICS
             plot_data = region_trend
             if common:
@@ -566,7 +594,7 @@ for i in range(0, len(chosen), 2):
                                legend=alt.Legend(title=None, orient='bottom')))
             chart = alt.Chart(plot_data).mark_line(point=True).encode(
                 x=alt.X('연대표시:N', sort=list(DECADES), axis=alt.Axis(title=None,labelAngle=0)),
-                y=alt.Y(f'{col}:Q', title=unit, scale=scale),
+                y=fixed_y(df, col, unit),
                 color=color,
                 tooltip=[alt.Tooltip('연대표시:N',title='연대'),
                          alt.Tooltip('전망구분:N', title='전망') if common else alt.Tooltip('SSP:N', title='기후 시나리오'),
@@ -580,6 +608,7 @@ with st.expander('지표별 설명 및 계산 방법'):
     st.caption('인구 및 시설 전망은 기후 SSP별로 동일한 사회경제 가정을 사용합니다. 단위가 다른 지표는 별도의 그래프로 표시합니다.')
 
 st.subheader(f'{region_selected} — SSP별 HVI 장기 변화')
+st.caption('모든 시군의 HVI 그래프는 세로축 0~1 및 동일 눈금을 사용합니다.')
 trend = df[df['시군'] == region_selected].copy()
 trend['연대표시'] = trend['연대키'].astype(str) + '년대'
 
@@ -600,7 +629,7 @@ line_chart = (
                 labelPadding=9,
             ),
         ),
-        y=alt.Y('HVI_A:Q', title='폭염 취약성 지수 (HVI)', scale=alt.Scale(zero=True)),
+        y=fixed_y(df, 'HVI_A', '폭염 취약성 지수 (HVI)'),
         color=alt.Color(
             'SSP:N',
             scale=alt.Scale(domain=SCENARIOS, range=SSP_LINE_COLORS),
